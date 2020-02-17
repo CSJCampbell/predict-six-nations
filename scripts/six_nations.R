@@ -207,40 +207,6 @@ rbind(tab, list(
         n = c(0, 0, 0, 0))) %>% 
     pivot_wider(names_from = Predicted, values_from = n)
 
-###########################################################
-
-# 2020 season
-head(fixtures)
-
-fixtures$Prediction <- predict(rating, 
-    select(fixtures, Season, Team, Opposition), 
-    # Team is Home
-    tng = 0, gamma = hmin$minimum)
-
-fixtures <- fixtures %>% 
-    mutate(
-        Result = cut(Prediction, 
-            breaks = draw_bins, 
-            labels = c("loss", "draw", "win"), 
-            include.lowest = TRUE))
-select(fixtures, Date, Team, Opposition, Result)
-#    Date                 Team     Opposition Result
-#    <chr>                <chr>    <chr>      <fct> 
-#  1 Saturday 1 February  Wales    Italy      win   
-#  2 Saturday 1 February  Ireland  Scotland   win   
-#  3 Sunday 2 February    France   England    loss  
-#  4 Saturday 8 February  Ireland  Wales      win   
-#  5 Saturday 8 February  Scotland England    loss  
-#  6 Sunday 9 February    France   Italy      win   
-#  7 Saturday 22 February Italy    Scotland   loss  
-#  8 Saturday 22 February Wales    France     win   
-#  9 Sunday 23 February   England  Ireland    win   
-# 10 Saturday 7 March     Ireland  Italy      win   
-# 11 Saturday 7 March     England  Wales      win   
-# 12 Sunday 8 March       Scotland France     draw  
-# 13 Saturday 14 March    Wales    Scotland   win   
-# 14 Saturday 14 March    Italy    England    loss  
-# 15 Saturday 14 March    France   Ireland    loss  
 
 ###########################################################
 
@@ -248,35 +214,31 @@ select(fixtures, Date, Team, Opposition, Result)
 
 dat_score <- dat_score %>% 
     mutate(
-        Prediction = predict(rating,
+        Predict_Team = predict(rating,
             tibble(Season, Team, Opposition),
             tng = 0, gamma = hmin$minimum * (Home * 2 - 1)),
-        Odds = Prediction / (1 - Prediction),
-        Logit = log(Odds))
+        Predict_Opp = 1 - Predict_Team,
+        Odds_Team = Predict_Team / (1 - Predict_Team),
+        Logit_Team = log(Odds_Team), 
+        Odds_Opp = Predict_Opp / (1 - Predict_Opp),
+        Logit_Opp = log(Odds_Opp))
 
 # split
 score_train <- filter(dat_score, Season < 19)
 score_test <- filter(dat_score, Season == 19)
 
-# stack
-score_train_rev <- transmute(score_train, 
-    Team = Opposition,
-    For = Aga,
-    Try_Team = Try_Opp, 
-    Con_Team = Con_Opp,
-    Pen_Team = Pen_Opp,
-    Drop_Team = Drop_Opp,
-    Prediction = 1 - Prediction,
-    Odds = Prediction / (1 - Prediction),
-    Logit = log(Odds))
 
 # score model
 score_data <- rbind(
-    select(score_train, Team, For, Logit),
-    select(score_train_rev, Team, For, Logit))
+    select(score_train, Team, For, Logit_Team, Opposition),
+    transmute(score_train, 
+        Team = Opposition,
+        For = Aga, 
+        Logit_Team = Logit_Opp, 
+        Opposition = score_train$Team))
 
 ggplot(score_data,
-    aes(x = Logit, y = For)) + 
+    aes(x = Logit_Team, y = For)) + 
     geom_bin2d(binwidth = c(0.5, 5)) +
     geom_smooth(method = lm) + 
     theme_at() +
@@ -287,34 +249,38 @@ ggplot(score_data,
 #ggsave("04_score.png", height = 6, width = 10, dpi = 124)
 
 # model shown in plot with interaction terms on gradient
-score_model <- lm(For ~ Logit * Team, data = score_data)
+score_model <- lm(For ~ Logit_Team * Team, data = score_data)
 summary(score_model)
+AIC(score_model)
+# including opponent does not improve fit
+score_model_opp <- lm(For ~ Logit_Team * Team + Opposition, data = score_data)
+summary(score_model_opp)
+AIC(score_model_opp)
 
+# Poisson?
+score_model_pois <- glm(For ~ Logit_Team * Team, data = score_data, family = poisson)
+summary(score_model_pois)
+AIC(score_model_pois)
+
+
+# predict based on score
 score_train <- score_train %>% 
     mutate(
-        Odds_Team = Prediction / (1 - Prediction),
-        Logit_Team = log(Odds_Team), 
-        Odds_Opp = (1 - Prediction) / Prediction,
-        Logit_Opp = log(Odds_Opp), 
         Predict_For = predict(score_model, 
-            newdata = tibble(Logit = Logit_Team, Team)), 
+            newdata = tibble(Logit_Team, Team)), 
         Predict_Aga = predict(score_model, 
-            newdata = tibble(Logit = Logit_Opp, Team = Opposition)))
+            newdata = tibble(Logit_Team = Logit_Opp, Team = Opposition)))
 
 # predict for test
 score_test <- score_test %>% 
     mutate(
-        Odds_Team = Prediction / (1 - Prediction),
-        Logit_Team = log(Odds_Team), 
-        Odds_Opp = (1 - Prediction) / Prediction,
-        Logit_Opp = log(Odds_Opp), 
         Predict_For = predict(score_model, 
-            newdata = tibble(Logit = Logit_Team, Team)), 
+            newdata = tibble(Logit_Team, Team)), 
         Predict_Aga = predict(score_model, 
-            newdata = tibble(Logit = Logit_Opp, Team = Opposition)))
+            newdata = tibble(Logit_Team = Logit_Opp, Team = Opposition)))
 
 # stack and flip
-score_data <- rbind(
+score_data19 <- rbind(
     select(score_test, Team, For, Predict_For),
     transmute(score_test, 
         Team = Opposition,
@@ -322,7 +288,7 @@ score_data <- rbind(
         Predict_For = Predict_Aga))
 
 # scores look okay
-ggplot(score_data,
+ggplot(score_data19,
     aes(x = Predict_For, y = For)) + 
     geom_bin2d(binwidth = c(5, 5)) +
     geom_smooth(method = lm, se = FALSE) + 
@@ -335,12 +301,12 @@ ggplot(score_data,
     facet_wrap(~Team)
 #ggsave("05_test_score.png", height = 6, width = 10, dpi = 124)
 
-summarise(transmute(score_data, For, Predict_For = round(Predict_For)),
+summarise(transmute(score_data19, For, Predict_For = round(Predict_For)),
     `Mean Abs Error` = mean(abs(For - Predict_For)), 
     `Root Mean Square` = sqrt(mean((For - Predict_For)^2)))
 #    `Mean Abs Error` `Root Mean Square`
 #               <dbl>              <dbl>
-#  1              5.9               8.57
+#  1             5.87               8.29
 
 tries_data <- rbind(
     select(score_train, Team, Try_Team, Logit_Team),
@@ -446,3 +412,172 @@ ggplot(rbind(
     scale_fill_viridis_c(direction = -1, alpha = 0.8, begin = 0.5, breaks = 1:3) + 
     facet_wrap(~Team)
 #ggsave("09_test_score2.png", height = 6, width = 10, dpi = 124)
+
+###########################################################
+
+# update ratings with 2019 results
+rating19 <- dat %>% 
+    filter(Pick) %>% 
+    select(Season, Team, Opposition, Res) %>% 
+    steph(gamma = hmin$minimum * (filter(dat, Pick)$Home * 2 - 1))
+
+# score model
+score_data19 <- mutate(dat, 
+    Predict = predict(rating19,
+        tibble(Season, Team, Opposition),
+        tng = 0, gamma = hmin$minimum * (Home * 2 - 1)),
+    Odds = Predict / (1 - Predict),
+    Logit = log(Odds))
+
+# model shown in plot with interaction terms on gradient
+score_model19 <- lm(For ~ Logit * Team, data = score_data19)
+summary(score_model19)
+
+score_data19 <- mutate(score_data19,
+    Predict_For_Raw = fitted(score_model19), 
+    Predict_Aga_Raw = predict(score_model19, 
+        newdata = tibble(Logit = log(1 / Odds), Team = Opposition), 
+        type = "response"), 
+    Predict_For = round(Predict_For_Raw), 
+    Predict_Aga = round(Predict_Aga_Raw), 
+    Predict_For18_Raw = predict(score_model, 
+        newdata = tibble(Logit_Team = Logit, Team), 
+        type = "response"), 
+    Predict_Diff_Raw = Predict_For_Raw - Predict_Aga_Raw)
+
+ggplot(
+    select(score_data19, For, Predict_For, Team),
+    aes(x = Predict_For, y = For)) + 
+    geom_bin2d(binwidth = c(5, 5)) +
+    geom_smooth(method = lm, se = FALSE) + 
+    theme_at() +
+    xlab("Predicted Score For") +
+    ylab("Score For") +
+    coord_fixed() + 
+    geom_abline() + 
+    scale_fill_viridis_c(direction = -1, alpha = 0.8) + 
+    facet_wrap(~Team)
+
+# how many times is score correct?
+summarise(score_data19, 
+    correct = sum(For == Predict_For), 
+    diff = sum((For - Against) == round(Predict_Diff_Raw)))
+# # A tibble: 1 x 1
+# correct  diff
+# <int> <int>
+#     1       8     6
+
+common_scores <- score_data19 %>% 
+    group_by(For) %>% 
+    summarise(N = n())
+
+sum(!score_data19$Predict_For %in% common_scores$For)
+# [1] 10
+
+#' replace scores with nearest likely neighbour
+#' @param x numeric vector scores to update
+#' @param table data frame with two columns For and n
+#' where For is score value, and N is value frequency
+#' @return numeric vector of length x where all values have been updated
+#' @examples 
+#' adjust_score(x = 1:3, table = tibble(For = 3, N = 1))
+#' adjust_score(x = c(0, 1, 10, 100), table = tibble(For = c(0, 3, 5, 7), N = c(1, 3, 2, 1)))
+adjust_score <- function(x, table) {
+    stopifnot(is.numeric(x))
+    out <- numeric(length(x))
+    x[x < min(table$For)] <- min(table$For)
+    x[x > max(table$For)] <- max(table$For)
+    unique_x <- unique(x)
+    all_rows <- seq.int(from = min(table$For), to = max(table$For))
+    all_rows <- all_rows[!all_rows %in% table$For]
+    table <- rbind(table, 
+        tibble(For = all_rows, N = rep(-1, times = length(all_rows)))) %>% 
+        arrange(For)
+    for (ii in seq_along(unique_x)) {
+        # scores in neighbourhood
+        nearby <- slice(
+            table, 
+            seq.int(
+                max(1, unique_x[ii] - 2), 
+                min(nrow(table), unique_x[ii] + 2)))
+        # force length 1
+        score <- filter(nearby,
+            N == max(N, na.rm = TRUE))$For
+        if (length(score) > 1) {
+            score <- score[sample.int(n = length(score), size = 1)]
+        }
+        out[x == unique_x[ii]] <- score
+    }
+    out
+}
+
+set.seed(3534)
+score_data19 <- mutate(score_data19,
+    Predict_For_Adj = adjust_score(x = Predict_For, table = common_scores), 
+    Predict_Aga_Adj = adjust_score(x = Predict_Aga, table = common_scores))
+
+sum(!score_data19$Predict_For_Adj %in% common_scores$For)
+
+summarise(score_data19, 
+    correct = sum(For == Predict_For_Adj))
+# # A tibble: 1 x 1
+#  correct
+#    <int>
+# 1     18
+
+###########################################################
+
+# 2020 season
+head(fixtures)
+
+set.seed(23526)
+fixtures <- fixtures %>% 
+    mutate(
+        Predict_Team <- predict(rating19, 
+            tibble(Season, Team, Opposition), 
+            # Team is Home
+            tng = 0, gamma = hmin$minimum),
+        Predict_Opp = 1 - Predict_Team,
+        Odds_Team = Predict_Team / (1 - Predict_Team),
+        Logit_Team = log(Odds_Team), 
+        Odds_Opp = Predict_Opp / (1 - Predict_Opp),
+        Logit_Opp = log(Odds_Opp),
+        Predict_For = round(predict(score_model19, 
+            newdata = tibble(Logit = Logit_Team, Team))), 
+        Predict_Aga = round(predict(score_model19, 
+            newdata = tibble(Logit = Logit_Opp, Team = Opposition))), 
+        Predict_For_Adj = adjust_score(x = Predict_For, table = common_scores), 
+        Predict_Aga_Adj = adjust_score(x = Predict_Aga, table = common_scores), 
+        Result_Rating = cut(Predict_Team, 
+            breaks = draw_bins, 
+            labels = c("loss", "draw", "win"), 
+            include.lowest = TRUE), 
+        Result_Score = case_when(
+            Predict_For_Adj > Predict_Aga_Adj ~ "win",
+            Predict_For_Adj == Predict_Aga_Adj ~ "draw", 
+            Predict_For_Adj < Predict_Aga_Adj ~ "loss"))
+
+transmute(fixtures, 
+    Date = as.Date(paste(Date, "2020"), format = "%A %d %B %Y"), 
+    Team, Opposition, 
+    Predict_For_Adj, Predict_Aga_Adj, 
+    Result_Rating, Result_Score)
+
+#    Date       Team  Opposition Predict_For_Adj Predict_Aga_Adj Result_Rating
+#    <date>     <chr> <chr>                <dbl>           <dbl> <fct>        
+#  1 2020-02-01 Wales Italy                   38               9 win          
+#  2 2020-02-01 Irel… Scotland                26              13 win          
+#  3 2020-02-02 Fran… England                 16              21 loss         
+#  4 2020-02-08 Irel… Wales                   16              13 win          
+#  5 2020-02-08 Scot… England                 16              23 loss         
+#  6 2020-02-09 Fran… Italy                   29              13 win          
+#  7 2020-02-22 Italy Scotland                16              21 loss         
+#  8 2020-02-22 Wales France                  22              13 win          
+#  9 2020-02-23 Engl… Ireland                 21              13 win          
+# 10 2020-03-07 Irel… Italy                   38              13 win          
+# 11 2020-03-07 Engl… Wales                   21              13 win          
+# 12 2020-03-08 Scot… France                  16              21 loss         
+# 13 2020-03-14 Wales Scotland                26              13 win          
+# 14 2020-03-14 Italy England                 13              38 loss         
+# 15 2020-03-14 Fran… Ireland                 16              16 loss  
+
